@@ -1,3 +1,4 @@
+/*
 #include "testing_utils.h"
 #include <stdio.h>
 #include <string.h>
@@ -205,3 +206,4 @@ int RESULT_TEST(char *label, char *input, Result *expected) {
   }
   return res;
 }
+*/

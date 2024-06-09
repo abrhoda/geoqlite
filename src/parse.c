@@ -1,9 +1,11 @@
-//#include "tokenize.h"
+#include "parse.h"
+
 #include <ctype.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
-
+#include <errno.h>
+#include <string.h>
+#include <stdlib.h>
 
 /* 
  * Implement look up tables to optimize the to upper, to lower, is alnum, is digit functions
@@ -21,7 +23,7 @@ static const char GET_KEYWORD[] = "GET";
 static const char DELETE_KEYWORD[] = "DEL";
 static const char DROP_KEYWORD[] = "DROP";
 static const char POINT_KEYWORD[] = "POINT";
-static const char BOUNDS_KEYWORD[] = "BOUNDS";
+static const char BOUND_KEYWORD[] = "BOUND";
 
 static const char *const RESERVED_WORDS[RESERVED_WORDS_COUNT] = {
   SET_KEYWORD,
@@ -29,7 +31,7 @@ static const char *const RESERVED_WORDS[RESERVED_WORDS_COUNT] = {
   DELETE_KEYWORD,
   DROP_KEYWORD,
   POINT_KEYWORD,
-  BOUNDS_KEYWORD,
+  BOUND_KEYWORD,
 };
 
 typedef enum {
@@ -37,7 +39,7 @@ typedef enum {
   TOKEN_EMPTY,
   TOKEN_SPACE,
   TOKEN_INTEGER,
-  TOKEN_FLOAT,
+  TOKEN_DOUBLE,
   TOKEN_STRING
 } TokenType;
 
@@ -46,13 +48,13 @@ static size_t get_next_token_len(const char *pch, TokenType *token_type) {
   if (isspace(pch[0])) {
     for(len=1; isspace(pch[len]); len++) {}
     *token_type = TOKEN_SPACE;
-  } else if (isdigit((unsigned char) pch[0]) || ((pch[0] == '.' || pch[0] == '-') && isdigit(pch[1]))) {
-    // FIXME this is messy and has redundant checks but without a fallthrough of a case statement, we need to recheck why the statement was entered with something like `pch[0] == '.'` or `has_dot` boolean. This can be cleaned up when the above mentioned lookup table and switch/case optimzation is being implemented but for now, this is good enough. This also doesn't allow the ',' instead of '.' for floating point. This is common internationally.
+  } else if (isdigit((unsigned char) pch[0]) || ((pch[0] == '.' || pch[0] == '+' || pch[0] == '-') && isdigit(pch[1]))) {
+    // FIXME this is messy and has redundant checks but without a fallthrough of a case statement, we need to recheck why the statement was entered with something like `pch[0] == '.'` or `has_dot` boolean. This can be cleaned up when the above mentioned lookup table and switch/case optimzation is being implemented but for now, this is good enough. This also doesn't allow the ',' instead of '.' for decimal point. This is common internationally.
     *token_type = TOKEN_INTEGER; 
     bool has_dot = false;
     if (pch[0] == '.') {
       has_dot = true;
-      *token_type = TOKEN_FLOAT;
+      *token_type = TOKEN_DOUBLE;
     }
     for(len=1; isdigit((unsigned char) pch[len]); len++) {} 
     if (pch[len] == '.') {
@@ -60,7 +62,7 @@ static size_t get_next_token_len(const char *pch, TokenType *token_type) {
         *token_type = TOKEN_ERROR;
         return len;
       }
-      *token_type = TOKEN_FLOAT;
+      *token_type = TOKEN_DOUBLE;
       len++;
       for(; isdigit((unsigned char) pch[len]); len++) {}
     }
@@ -68,7 +70,7 @@ static size_t get_next_token_len(const char *pch, TokenType *token_type) {
     // only allow whole number exponential notation
     if (pch[len] == 'e' || pch[len] == 'E') {
       if (isdigit((unsigned char) pch[len+1]) || ((pch[len+1] == '-' || pch[len+1] == '+') && isdigit((unsigned char) pch[len+2]))) {
-        *token_type = TOKEN_FLOAT;
+        *token_type = TOKEN_DOUBLE;
         len+=2;
         for(; isdigit((unsigned char) pch[len]); len++) {}
       } else {
@@ -100,13 +102,13 @@ static size_t get_next_token_len(const char *pch, TokenType *token_type) {
 typedef enum {
   UNKNOWN_STEP,
   KEY,
-  DROP_KEY, //
   ID,
+  BOUNDS_OR_POINT,
+  BOUNDS,
   POINT,
   X_VALUE,
   Y_VALUE,
   Z_VALUE,
-  BOUNDS,
 } Step;
 
 #define STEPS_ENUM_COUNT 12
@@ -115,14 +117,13 @@ static const char * const STEP_TO_STRING[STEPS_ENUM_COUNT] = {
   "UNKNOWN_STEP",
   "KEY",
   "ID",
+  "BOUNDS_OR_POINT",
+  "BOUNDS",
   "POINT",
-  "X_VALUE,
+  "X_VALUE",
   "Y_VALUE",
   "Z_VALUE",
-  "BOUNDS",
 };
-
-
 
 typedef enum {
   PARSE_OK,                                          // 0
@@ -132,12 +133,17 @@ typedef enum {
   INVALID_KEY_VALUE,                              // 3
   INVALID_ID_VALUE,                              // 3
   INVALID_STEP_ERROR,                                // 4
+  INVALID_BOUNDS_OR_POINT,
+  INVALID_X_VALUE,
+  INVALID_Y_VALUE,
+  INVALID_Z_VALUE,
   END_OF_TOKENS_REACHED,                             // 5
   EXPECTED_END_OF_TOKENS,                            // 6
 } ParserResult;
 
 #define PARSER_RESULTS_ENUM_COUNT // TODO
 
+// TODO make this match ParseResult enum
 static const char * const PARSER_RESULT_TO_STRING[PARSER_RESULTS_ENUM_COUNT] = {
   "PARSE_OK",
   "OUT_OF_MEMORY",
@@ -146,12 +152,15 @@ static const char * const PARSER_RESULT_TO_STRING[PARSER_RESULTS_ENUM_COUNT] = {
   "INVALID_KEY_VALUE",
   "INVALID_ID_VALUE",
   "INVALID_STEP_ERROR",
+  "INVALID_BOUNDS_OR_POINT",
+  "INVALID_X_VALUE",
+  "INVALID_Y_VALUE",
+  "INVALID_Z_VALUE",
   "END_OF_TOKENS_REACHED",
   "EXPECTED_END_OF_TOKENS"
 };
 
 #define ERROR_MESSAGE_MAX_BUFFER_SIZE 512
-typedef void (*error_callback)(int error_code, const char *error_message);
 
 /*
  * Function that is responsible for formatting the error message which will be sent to the user supplied error_callback function. NOTICE: buffer is a stack allocated char array (to avoid any alloc issues) so if the user wants to maintain the error message for longer, the error_callback function should make a copy of the error_message for the user to use.
@@ -168,7 +177,7 @@ static void internal_error_callback_handler(error_callback ec, int error_code, c
   // empty 512 byte buffer.
   char buffer[ERROR_MESSAGE_MAX_BUFFER_SIZE] = {'\0'};
 
-  int bytes_written = snprint(buffer, ERROR_MESSAGE_MAX_BUFFER_SIZE, "%s(%d) - cause: %s. position in statement %d.", PARSER_RESULT_TO_STRING[error_code], error_code, cause, position);
+  int bytes_written = snprintf(buffer, ERROR_MESSAGE_MAX_BUFFER_SIZE, "%s(%d) - cause: %s. position in statement %d.", PARSER_RESULT_TO_STRING[error_code], error_code, cause, position);
   if (bytes_written >= 0 || bytes_written < ERROR_MESSAGE_MAX_BUFFER_SIZE) {
     ec(error_code, buffer);
   } else {
@@ -176,65 +185,18 @@ static void internal_error_callback_handler(error_callback ec, int error_code, c
   }
 }
 
-typedef enum {
-  DELETE,
-  GET,
-  SET,
-  DROP
-} CommandType;
-
-typedef struct {
-  float lat;
-  float lon;
-  float z;
-} Point;
-
-typedef struct {
-  CommandType command_type;
-  char *key;
-  char *id;
-  char **values;
-  size_t values_count;
-} PreparedStatement;
-
-
-/*
- * case insensitive string comparison of strings a and b.
- *
- * returns 0 if case insensitive compare is equal. any other values is not
- * equal.
- */
-int strncmpci(char const *a, char const *b, size_t n) {
-  while (n && *a &&
-         (tolower(*(unsigned char *)a) == tolower(*(unsigned char *)b))) {
-    a++;
-    b++;
-    n--;
-  }
-  if (n == 0) {
-    return 0;
-  } else {
-    return (tolower(*(unsigned char *)a) - tolower(*(unsigned char *)b));
-  }
-}
-
 /*
  * returns 0 if `word` is in the reserved word list, else 1.
  * NOTE doesn't account for negative ptrdiff_t values
  */
-bool is_reserved_word(const char *pch, size_t len) {
+static int is_reserved_word(const char *pch, size_t len) {
   for (int i = 0; i < RESERVED_WORDS_COUNT; i++) {
-    // check lengths match
-    if (len != strlen(RESERVED_WORDS[i])) {
-      continue;
-    }
-
     // check case insensitive compare
     if (strncmpci(pch, RESERVED_WORDS[i], len) == 0) {
-      return true;
+      return 0;
     }
   }
-  return false;
+  return 1;
 }
 
 /*
@@ -250,24 +212,24 @@ bool is_reserved_word(const char *pch, size_t len) {
  *  - else, error where the return value matches the error_code (reason of failure).
  *
  */
-static int make_prepared_statement(const char *cmd, *PreparedStatement prepared_statement, *error_callback ec_func) {
+int make_prepared_statement(const char *cmd, PreparedStatement *prepared_statement, error_callback ec_func) {
   
-  TokenType tt;
+  TokenType tt = 0;
   size_t len;
-  char *cursor = cmd;
+  const char *cursor = cmd;
+  Point *cur_point;
   Step step = UNKNOWN_STEP;
+  
   while (*cursor != '\0') {
     len = get_next_token_len(cursor, &tt);
-    printf("[DEBUG] Got token of type %d and value '%.*s'\n", tt, (int) len, cursor);
-    if (tt = TOKEN_ERROR) {
+    if (tt == TOKEN_ERROR) {
       if (ec_func != NULL) {
-        internal_error_callback_handler(ec_func, INVALID_TOKEN, "Invalid token in sql statement", (cursor-cmd));
+        internal_error_callback_handler(ec_func, INVALID_TOKEN, "Invalid token in statement", (cursor-cmd));
       }
       return INVALID_TOKEN;
     }
 
     if (tt == TOKEN_SPACE) {
-      printf("[DEBUG] Token was a space. Continuing to next token.\n");
       cursor += len;
       continue;
     }
@@ -285,10 +247,10 @@ static int make_prepared_statement(const char *cmd, *PreparedStatement prepared_
           step = KEY;
         } else if (strncmpci(cursor, DROP_KEYWORD, len) == 0) {
           prepared_statement->command_type = DROP;
-          step = DROP_KEY;
+          step = KEY;
         }
         // didn't set next step
-        if (step != KEY || step != DROP_KEY) {
+        if (step != KEY) {
           if (ec_func != NULL) {
             internal_error_callback_handler(ec_func, INVALID_COMMAND_TYPE, "Invalid command type keyword", (cursor-cmd));
           }
@@ -298,45 +260,45 @@ static int make_prepared_statement(const char *cmd, *PreparedStatement prepared_
         cursor += len;
         break;
       }
-      case DROP_KEY:
       case KEY: {
-        if (tt == TOKEN_INTEGER || tt == TOKEN_FLOAT || (tt == TOKEN_STRING && (is_reserved_word(cursor, len) != 0))) {
-          char *key = (char *)malloc(sizeof(char) * len + 1);
+        if (tt == TOKEN_INTEGER || tt == TOKEN_DOUBLE || ((tt == TOKEN_STRING) && (is_reserved_word(cursor, len) != 0))) {
+          /* Changing to Span
+          char *key = malloc(sizeof(char) * len + 1);
           if (key == NULL) {
             if (ec_func != NULL) {
               internal_error_callback_handler(ec_func, OUT_OF_MEMORY, "Malloc returned NULL for key.", (cursor-cmd));
             }
             return OUT_OF_MEMORY;
           }
+          
           strncpy(key, cursor, len);
           key[len] = '\0';
           prepared_statement->key = key;
-
+          */
+          prepared_statement->key = (Span){ .start = cursor, .length = len };
         } else {
           if (ec_func != NULL) {
             internal_error_callback_handler(ec_func, INVALID_KEY_VALUE, "Invalid key value", (cursor-cmd));
           }
           return INVALID_KEY_VALUE;
         }
+        // increment cursor
         cursor += len;
-        // TODO get rid of DROP_KEY and just checke the command type here
-        if (step == DROP_KEY) {
-          // check that this is the end of the command string. TODO include TOKEN_SPACE to allow for spaces at the end of the command string. 
-          if ((cursor != '\0') || (get_next_token_len(cursor, &tt) != 0)) {
-            if (ec_func != NULL) {
-              internal_error_callback_handler(ec_func, INVALID_KEY_VALUE, "Expected end of tokens in drop statement.", (cursor-cmd));
-            }
-            return INVALID_KEY_VALUE;
-          }
-          return PARSE_OK;
-        } else {
-          step = ID;
-        }
+        step = ID;
         break;
       }
       case ID: {
-        if (tt == TOKEN_STRING || tt == TOKEN_INTEGER || tt == TOKEN_FLOAT) {
-          char *id = (char *)malloc(sizeof(char) * len + 1);
+        // drop commands shouldn't have an ID
+        if (prepared_statement->command_type == DROP) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, EXPECTED_END_OF_TOKENS, "Expected end of tokens in drop statement.", (cursor-cmd));
+          }
+          return EXPECTED_END_OF_TOKENS;
+        }
+
+        if (tt == TOKEN_INTEGER || tt == TOKEN_DOUBLE || (tt == TOKEN_STRING && (is_reserved_word(cursor, len) != 0))) {
+          /* Changing to Span
+          char *id = malloc(sizeof(char) * len + 1);
           if (id == NULL) {
             if (ec_func != NULL) {
               internal_error_callback_handler(ec_func, OUT_OF_MEMORY, "Malloc returned NULL for id.", (cursor-cmd));
@@ -346,37 +308,158 @@ static int make_prepared_statement(const char *cmd, *PreparedStatement prepared_
           strncpy(id, cursor, len);
           id[len] = '\0';
           prepared_statement->id = id;
+          */
 
+          prepared_statement->key = (Span){ .start = cursor, .length = len };
         } else {
           if (ec_func != NULL) {
-            internal_error_callback_handler(ec_func, INVALID_KEY_VALUE, "Invalid id value", (cursor-cmd));
+            internal_error_callback_handler(ec_func, INVALID_ID_VALUE, "Invalid id value", (cursor-cmd));
           }
-          return INVALID_KEY_VALUE;
+          return INVALID_ID_VALUE;
         }
-        step = ID;
+
+
+        cursor += len;
+        step = BOUNDS_OR_POINT;
+        break;
+      }
+      case BOUNDS_OR_POINT: {
+        if (prepared_statement->command_type == GET || prepared_statement->command_type == DELETE) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, EXPECTED_END_OF_TOKENS, "Expected end of tokens in GET/DELETE statement.", (cursor-cmd));
+          }
+          return EXPECTED_END_OF_TOKENS;
+        } else {
+          
+
+          if ((strncmpci(cursor, BOUND_KEYWORD, len) != 0) && (strncmpci(cursor, POINT_KEYWORD, len) != 0)) {
+            if (ec_func != NULL) {
+              internal_error_callback_handler(ec_func, INVALID_BOUNDS_OR_POINT, "Expected BOUND or POINT keyword", (cursor-cmd));
+            }
+            return INVALID_BOUNDS_OR_POINT;
+          }
+        }
+
+        // FIXME uses heap :(
+        cur_point = malloc(sizeof(Point));
+        if (cur_point == NULL) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, OUT_OF_MEMORY, "Malloc returned NULL for point.", (cursor-cmd));
+          }
+          return OUT_OF_MEMORY;
+        }
+
+        step = X_VALUE;
         cursor += len;
         break;
       }
+      case X_VALUE: {
+        if (tt != TOKEN_DOUBLE && tt != TOKEN_INTEGER) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, INVALID_X_VALUE, "Expected integer or double x value", (cursor-cmd));
+          }
+          return INVALID_X_VALUE;
+        }
+        char *tail;
+        errno = 0;
+        double val = strtod(cursor, &tail);        
+
+        // check if errno got set (overflow happened).
+        if (errno != 0) {
+          if (ec_func != NULL) {
+            // FIXME strerror -> strerror_s?
+            internal_error_callback_handler(ec_func, INVALID_X_VALUE, strerror(errno), (cursor-cmd));
+          }
+          return INVALID_X_VALUE;
+        }
+
+        //check we get the whole expected number parsed.
+        if (*tail != *(cursor + len)) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, INVALID_X_VALUE, "Failed to parse entire x value.", (cursor-cmd));
+          }
+          return INVALID_X_VALUE;
+        }
+
+        cur_point->x = val;
+        cursor += len;
+        step = Y_VALUE;
+        break;
+      }
+      case Y_VALUE: {
+        if (tt != TOKEN_DOUBLE && tt != TOKEN_INTEGER) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, INVALID_Y_VALUE, "Expected integer or double y value", (cursor-cmd));
+          }
+          return INVALID_Y_VALUE;
+        }
+        char *tail;
+        errno = 0;
+        double val = strtod(cursor, &tail);        
+
+        // check if errno got set (overflow happened).
+        if (errno != 0) {
+          if (ec_func != NULL) {
+            // FIXME strerror -> strerror_s?
+            internal_error_callback_handler(ec_func, INVALID_Y_VALUE, strerror(errno), (cursor-cmd));
+          }
+          return INVALID_Y_VALUE;
+        }
+
+        //check we get the whole expected number parsed.
+        if (*tail != *(cursor + len)) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, INVALID_Y_VALUE, "Failed to parse entire y value.", (cursor-cmd));
+          }
+          return INVALID_Y_VALUE;
+        }
+
+        cur_point->y = val;
+        cursor += len;
+        step = Z_VALUE;
+        break;
+      }
+      case Z_VALUE: {
+        cur_point->has_z = true;
+        if (tt != TOKEN_DOUBLE && tt != TOKEN_INTEGER) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, INVALID_Z_VALUE, "Expected integer or double z value", (cursor-cmd));
+          }
+          return INVALID_Z_VALUE;
+        }
+        char *tail;
+        errno = 0;
+        double val = strtod(cursor, &tail);        
+
+        // check if errno got set (overflow happened).
+        if (errno != 0) {
+          if (ec_func != NULL) {
+            // FIXME strerror -> strerror_s?
+            internal_error_callback_handler(ec_func, INVALID_Z_VALUE, strerror(errno), (cursor-cmd));
+          }
+          return INVALID_Z_VALUE;
+        }
+
+        //check we get the whole expected number parsed.
+        if (*tail != *(cursor + len)) {
+          if (ec_func != NULL) {
+            internal_error_callback_handler(ec_func, INVALID_Z_VALUE, "Failed to parse entire z value.", (cursor-cmd));
+          }
+          return INVALID_Z_VALUE;
+        }
+
+        cur_point->y = val;
+        cursor += len;
+        step = Z_VALUE;
+        break;
+      }
+
       default: {
-        // TODO
+        if (ec_func != NULL) {
+          internal_error_callback_handler(ec_func, INVALID_STEP_ERROR, "Invalid step value", (cursor-cmd));
+        }
         return INVALID_STEP_ERROR;
       }
     }
-  }
-}
-
-void stderr_logger(int ec, const char *msg) {
-
-  fprintf(stderr, "Error_code %d: msg: %s\n", ec,msg);
-}
-
-void main(void) {
-
-  char *sql = "CREATE    \n    TABLE fleet (ID, name, longitude, latitude, z-index) with values 1, \"TEST\", -1, .1e+12, 1.0";
-
-  while (*pch != '\0') {
-    len = get_next_token_len(pch, &tt);
-    printf("Got token of type %d and value '%.*s'\n", tt, (int) len, pch);
-    pch += len;
   }
 }
