@@ -4,6 +4,7 @@
 
 // library headers
 #include "parse.h"
+#include "geoqlite.h"
 
 typedef struct {
   char *buffer;
@@ -45,11 +46,10 @@ void stderr_logger(int ec, const char * emsg) {
 }
 
 int main() {
+  printf("geoqlite cli v%s\n", GEOQLITE_VERSION);
 
   InputBuffer *input_buffer = new_input_buffer();
-
   PreparedStatement prepared_statement;
-
   while(1) {
     print_prompt();
     read_input(input_buffer);

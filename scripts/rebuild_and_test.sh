@@ -27,7 +27,7 @@ rebuild() {
   rm -rf "$BUILD_DIR"
 
   echo "Building in $BUILD_DIR"
-  mkdir "$BUILD_DIR" && cd "$BUILD_DIR" && cmake .. -DWITH_UNIT_TESTING=ON && make
+  mkdir "$BUILD_DIR" && cd "$BUILD_DIR" && cmake .. -DWITH_UNIT_TESTING=ON -DWITH_DEBUG=ON && make
   echo "changing to $BUILD_DIR"
   cd "$BUILD_DIR"
   ctest --verbose

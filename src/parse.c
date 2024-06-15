@@ -1,11 +1,12 @@
+#include "geometry.h"
 #include "parse.h"
 
 #include <ctype.h>
-#include <stddef.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 /* 
  * Implement look up tables to optimize the to upper, to lower, is alnum, is digit functions
@@ -111,7 +112,8 @@ typedef enum {
   Z_VALUE,
 } Step;
 
-#define STEPS_ENUM_COUNT 12
+/*
+#define STEPS_ENUM_COUNT 9
 
 static const char * const STEP_TO_STRING[STEPS_ENUM_COUNT] = {
   "UNKNOWN_STEP",
@@ -124,6 +126,7 @@ static const char * const STEP_TO_STRING[STEPS_ENUM_COUNT] = {
   "Y_VALUE",
   "Z_VALUE",
 };
+*/
 
 typedef enum {
   PARSE_OK,                                          // 0
@@ -462,4 +465,5 @@ int make_prepared_statement(const char *cmd, PreparedStatement *prepared_stateme
       }
     }
   }
+  return PARSE_OK;
 }

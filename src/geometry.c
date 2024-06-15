@@ -1,7 +1,7 @@
 #include <math.h>
+#include <stddef.h>
 
 #include "geometry.h"
-
 
 #ifndef FLOATING_POINT_PRECISION
 #define FLOATING_POINT_PRECISION 0.000001
@@ -22,6 +22,8 @@ int points_equal(Point *p1, Point *p2) {
   return 1;
 }
 
+/*
 void make_line_string(Point *points, size_t points_count) {
   
 }
+*/
